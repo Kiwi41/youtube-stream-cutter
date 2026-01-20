@@ -1,0 +1,152 @@
+name: Build and Release YouTube Cutter
+
+on:
+  push:
+    tags:
+      - 'v*'  # Déclenche sur les tags v1.0.0, v1.1.0, etc.
+  workflow_dispatch:  # Permet de lancer manuellement
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: YouTubeCutter-linux
+            output_name: YouTubeCutter
+            platform: linux
+          - os: windows-latest
+            artifact_name: YouTubeCutter-windows.exe
+            output_name: YouTubeCutter.exe
+            platform: windows
+          - os: macos-latest
+            artifact_name: YouTubeCutter-macos
+            output_name: YouTubeCutter
+            platform: macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+
+    - name: Download yt-dlp (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        mkdir -p bin
+        curl -L -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+        chmod +x bin/yt-dlp
+
+    - name: Download yt-dlp (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path bin
+        Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "bin/yt-dlp.exe"
+
+    - name: Download yt-dlp (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        mkdir -p bin
+        curl -L -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+        chmod +x bin/yt-dlp
+
+    - name: Download ffmpeg (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        curl -L -o ffmpeg_linux.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+        tar -xf ffmpeg_linux.tar.xz
+        FFMPEG_DIR=$(find . -type d -name "ffmpeg-*-amd64-static" | head -n 1)
+        cp $FFMPEG_DIR/ffmpeg bin/
+        cp $FFMPEG_DIR/ffprobe bin/
+        chmod +x bin/ffmpeg bin/ffprobe
+        rm -rf ffmpeg_linux.tar.xz $FFMPEG_DIR
+
+    - name: Download ffmpeg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg_win.zip"
+        Expand-Archive -Path "ffmpeg_win.zip" -DestinationPath "."
+        $ffmpegDir = Get-ChildItem -Directory -Filter "ffmpeg-*-essentials_build" | Select-Object -First 1
+        Copy-Item "$($ffmpegDir.FullName)/bin/ffmpeg.exe" "bin/"
+        Copy-Item "$($ffmpegDir.FullName)/bin/ffprobe.exe" "bin/"
+        Remove-Item "ffmpeg_win.zip"
+        Remove-Item $ffmpegDir.FullName -Recurse
+
+    - name: Download ffmpeg (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install ffmpeg
+        cp $(which ffmpeg) bin/
+        cp $(which ffprobe) bin/
+
+    - name: Create default config
+      shell: bash
+      run: |
+        cat > config.json <<EOF
+        {
+          "resolution": 720,
+          "audio_only": false,
+          "output_dir": ".",
+          "start": 0,
+          "end": 30
+        }
+        EOF
+
+    - name: Build executable
+      run: |
+        pyinstaller --onefile --windowed --name ${{ matrix.output_name }} --add-data "bin${{ runner.os == 'Windows' && ';' || ':' }}bin" --add-data "config.json${{ runner.os == 'Windows' && ';' || ':' }}." src/gui.py
+
+    - name: Rename artifact (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        mv dist/${{ matrix.output_name }} dist/${{ matrix.artifact_name }}
+
+    - name: Rename artifact (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        move dist\${{ matrix.output_name }} dist\${{ matrix.artifact_name }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: dist/${{ matrix.artifact_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/YouTubeCutter-linux/YouTubeCutter-linux
+          dist/YouTubeCutter-windows.exe/YouTubeCutter-windows.exe
+          dist/YouTubeCutter-macos/YouTubeCutter-macos
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
